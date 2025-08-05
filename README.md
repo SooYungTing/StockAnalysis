@@ -22,7 +22,7 @@ This project shows a high level of forecasting the daily closing stock prices of
     source stock/bin/activate #for Mac/Linux
     stock\Scripts\activate #for Windows
 
-    pip3 install ipykernel jupyter matplotlib numpy pandas scikit-learn tensorflow
+    pip3 install ipykernel jupyter matplotlib numpy pandas scikit-learn tensorflow kagglehub
 ```
 
 ## Why LSTM?
