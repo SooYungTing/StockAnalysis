@@ -33,6 +33,8 @@ st.set_page_config(
 ARTIFACT_DIR   = "models"
 DEFAULT_COLS_5 = ["Open", "High", "Low", "Close", "Volume"]
 ALT_COLS_4     = ["High", "Low", "Open", "Volume"]
+ARTIFACT_BASE_URL = "https://raw.githubusercontent.com/SooYungTing/StockAnalysis/main/models"
+
 
 # Helpers
 def _get_secret(name: str, default: str = "") -> str:
