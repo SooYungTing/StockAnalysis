@@ -1,0 +1,14 @@
+streamlit==1.48.1
+numpy==1.26.4
+pandas==2.3.2
+scikit-learn==1.5.1
+yfinance==0.2.65
+joblib==1.3.2
+
+# Model loading
+tensorflow==2.15.0
+keras==3.3.3
+
+h5py==3.10.0
+protobuf==4.25.4
+tensorflow-io-gcs-filesystem==0.37.0
