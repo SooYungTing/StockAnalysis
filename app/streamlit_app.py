@@ -7,6 +7,9 @@ os.environ["ABSL_LOGGING_STDERR_THRESHOLD"] = "3"
 import warnings
 warnings.filterwarnings("ignore")
 
+from pathlib import Path
+from typing import List, Tuple, Optional
+
 import numpy as np
 import pandas as pd
 import joblib
@@ -20,7 +23,7 @@ try:
 except Exception:
     pass
 
-#  page config
+# Page config
 st.set_page_config(
     page_title="Financial Time-Series Forecasting (LSTM)",
     page_icon="📈",
@@ -31,7 +34,14 @@ ARTIFACT_DIR   = "models"
 DEFAULT_COLS_5 = ["Open", "High", "Low", "Close", "Volume"]
 ALT_COLS_4     = ["High", "Low", "Open", "Volume"]
 
-# small metrics helpers 
+# Helpers
+def _get_secret(name: str, default: str = "") -> str:
+    """Safe accessor that won't crash if no secrets.toml exists."""
+    try:
+        return str(st.secrets.get(name, default))
+    except Exception:
+        return os.getenv(name, default)
+
 def rmse(y, yhat) -> float:
     y, yhat = np.asarray(y), np.asarray(yhat)
     return float(np.sqrt(((y - yhat) ** 2).mean()))
@@ -40,61 +50,95 @@ def smape(y, yhat) -> float:
     y, yhat = np.asarray(y, dtype=np.float64), np.asarray(yhat, dtype=np.float64)
     return float(100.0 * np.mean(np.abs(y - yhat) / (np.abs(y) + np.abs(yhat) + 1e-8)))
 
-# data fetch (cached) 
+# Data fetch (cached)
 @st.cache_data(show_spinner=False, ttl=60 * 30)
 def fetch_prices(ticker: str, period: str) -> pd.DataFrame:
     df = yf.download(ticker, period=period, auto_adjust=False, progress=False)
     if df is None or df.empty:
         raise RuntimeError(f"yfinance returned no data for '{ticker}' with period='{period}'.")
+    # Normalize column names like 'open' -> 'Open'
     df = df.rename(columns=str.capitalize)
     keep = [c for c in DEFAULT_COLS_5 if c in df.columns]
     return df[keep].dropna()
 
-# model/scalers loading (cached) 
+# Artifact discovery & loading 
+def _local_candidates() -> List[Path]:
+    here = Path(__file__).resolve().parent
+    return [
+        (here / ".." / "models").resolve(),
+        (here / "models").resolve(),
+        (Path.cwd() / "models").resolve(),
+    ]
+
+def _find_local_artifact(filename: str) -> Optional[Path]:
+    for base in _local_candidates():
+        p = (base / filename).resolve()
+        if p.exists():
+            return p
+    return None
+
 @st.cache_resource(show_spinner=False)
 def _load_model_tfkeras(path: str):
-    from tensorflow.keras.models import load_model
+    from tensorflow.keras.models import load_model 
     return load_model(path, compile=False)
 
 @st.cache_resource(show_spinner=False)
-def _load_model_keras3(path: str):
-    import keras
-    return keras.models.load_model(path, safe_mode=False, compile=False)
-
 def load_artifacts():
-    model_path = os.path.join(ARTIFACT_DIR, "model.h5")
-    sx_path    = os.path.join(ARTIFACT_DIR, "scaler_x.pkl")
-    sy_path    = os.path.join(ARTIFACT_DIR, "scaler_y.pkl")
+    """
+    Load model + scalers from local models/ or (optionally) a remote base URL.
+    Expected files: model.h5, scaler_x.pkl, scaler_y.pkl
+    """
+    files = ["model.h5", "scaler_x.pkl", "scaler_y.pkl"]
+    paths: dict[str, Optional[Path]] = {f: _find_local_artifact(f) for f in files}
 
-    if not (os.path.exists(model_path) and os.path.exists(sx_path) and os.path.exists(sy_path)):
+    missing = [f for f, p in paths.items() if p is None]
+    base_url = _get_secret("ARTIFACT_BASE_URL", "").strip() 
+
+    cache_dir = Path(".cache/models")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    if missing and base_url:
+        import requests
+        for f in missing:
+            url = base_url.rstrip("/") + "/" + f
+            dst = cache_dir / f
+            r = requests.get(url, timeout=30)
+            r.raise_for_status()
+            dst.write_bytes(r.content)
+            paths[f] = dst
+
+    still_missing = [f for f, p in paths.items() if p is None or not p.exists()]
+    if still_missing:
         raise FileNotFoundError(
-            "Missing artifacts. Expected in 'models/': model.h5, scaler_x.pkl, scaler_y.pkl"
+            "Missing artifacts: " + ", ".join(still_missing) +
+            ". Place files under 'models/' or set ARTIFACT_BASE_URL in Secrets/Env."
         )
 
-    # Keras 3 is more tolerant to mixed configs; try first
-    try:
-        model = _load_model_keras3(model_path)
-        loader = "keras.models.load_model (Keras 3)"
-    except Exception:
-        model = _load_model_tfkeras(model_path)
-        loader = "tensorflow.keras.models.load_model"
+    model_path = str(paths["model.h5"])
+    sx_path    = str(paths["scaler_x.pkl"])
+    sy_path    = str(paths["scaler_y.pkl"])
 
+    model   = _load_model_tfkeras(model_path)
     scaler_x = joblib.load(sx_path)
     scaler_y = joblib.load(sy_path)
+    loader   = "tensorflow.keras.models.load_model (TF/Keras 2.15)"
     return model, scaler_x, scaler_y, loader
 
-# scaler-driven input builder (robust to 4-vs-5 features)
-def build_inputs_to_match(model, raw_df: pd.DataFrame, scaler_x, window_from_ui: int):
+# Build inputs that match the trained artifacts (scaler & model)
+def build_inputs_to_match(
+    model,
+    raw_df: pd.DataFrame,
+    scaler_x,
+    window_from_ui: int
+) -> Tuple[np.ndarray, List[str], int]:
     """
-    Build model inputs that match the *trained* artifacts.
-
-    - Feature count is taken from scaler_x (n_features_in_) -> avoids transform() errors.
-    - Timesteps are taken from model.input_shape.
-    - Returns: X (np.ndarray), cols used (list[str]), timesteps (int).
+    Build model inputs that match the trainedt artifacts.
+    - Feature count comes from scaler_x.n_features_in_ (what transform() enforces)
+    - Timesteps come from model.input_shape
     """
-    # 1) timesteps & model feature count from model.input_shape
+    # 1) infer (None, T, F)
     try:
-        in_shape = model.input_shape 
+        in_shape = model.input_shape
     except AttributeError:
         in_shape = model.inputs[0].shape.as_list()
 
@@ -104,30 +148,26 @@ def build_inputs_to_match(model, raw_df: pd.DataFrame, scaler_x, window_from_ui:
     timesteps     = int(in_shape[1])
     n_feats_model = int(in_shape[2])
 
-    # 2) feature count from scaler (what transform() enforces)
+    # 2) use scaler's feature count/order to avoid transform errors
     n_feats_scaler = int(getattr(scaler_x, "n_features_in_", n_feats_model))
 
-    # 3) choose columns to match scaler
     if n_feats_scaler == 5 and all(c in raw_df.columns for c in DEFAULT_COLS_5):
         cols = DEFAULT_COLS_5
     elif n_feats_scaler == 4 and all(c in raw_df.columns for c in ALT_COLS_4):
         cols = ALT_COLS_4
     else:
-        numeric_cols = [c for c in raw_df.columns if np.issubdtype(raw_df[c].dtype, np.number)]
-        cols = numeric_cols[:n_feats_scaler]
+        numeric = [c for c in raw_df.columns if np.issubdtype(raw_df[c].dtype, np.number)]
+        cols = numeric[:n_feats_scaler]
         if len(cols) != n_feats_scaler:
-            raise ValueError(
-                f"Could not find {n_feats_scaler} numeric columns. Available: {list(raw_df.columns)}"
-            )
+            raise ValueError(f"Need {n_feats_scaler} numeric cols; available: {list(raw_df.columns)}")
 
-    # 4) warn if model/scaler disagree (we proceed with scaler’s count)
     if n_feats_model != n_feats_scaler:
         st.warning(
             f"Feature count mismatch: model expects {n_feats_model}, scaler expects {n_feats_scaler}. "
-            f"Proceeding with scaler’s order: {cols}"
+            f"Proceeding with scaler's order: {cols}"
         )
 
-    # 5) scale then create (N, 1, F) or (N-T, T, F)
+    # 3) scale and window
     try:
         scaled = raw_df[cols].copy()
         scaled[cols] = scaler_x.transform(scaled[cols])
@@ -139,12 +179,11 @@ def build_inputs_to_match(model, raw_df: pd.DataFrame, scaler_x, window_from_ui:
 
     vals = scaled.values
     if timesteps <= 1:
-        X = vals.reshape(-1, 1, n_feats_scaler)          # (N, 1, F)
+        X = vals.reshape(-1, 1, n_feats_scaler)  
     else:
-        X = np.array([vals[i - timesteps:i] for i in range(timesteps, len(vals))])  # (N-T, T, F)
+        X = np.array([vals[i - timesteps:i] for i in range(timesteps, len(vals))])  
         if window_from_ui != timesteps:
             st.info(f"Model expects window={timesteps}; UI window={window_from_ui}. Using model's window.")
-
     return X, cols, timesteps
 
 # UI 
@@ -155,9 +194,8 @@ with st.sidebar:
     ui_window = st.slider("Lookback window (days)", 20, 120, 80, step=5)
 
 st.title("📈 Financial Time-Series Forecasting (LSTM)")
-st.caption("Educational demo — not financial advice. Model served with pre-trained artifacts and time-based windowing.")
+st.caption("Educational demo - not financial advice. Model served with pre-trained artifacts and time-based windowing.")
 
-# Orchestration with visible progress & errors 
 with st.status("Initializing…", expanded=True) as s:
     # Load artifacts
     try:
@@ -206,7 +244,7 @@ with st.status("Initializing…", expanded=True) as s:
     # Align y_true to predictions
     # If you trained SAME-day target:
     y_true = raw_df["Close"].iloc[-len(yhat):].values
-    # If you trained NEXT-day target, use this instead:
+    # If you trained NEXT-day target, use:
     # y_true = raw_df["Close"].shift(-1).dropna().iloc[-len(yhat):].values
 
     # Ensure 1-D & matched lengths
@@ -216,7 +254,7 @@ with st.status("Initializing…", expanded=True) as s:
     yhat   = yhat[-n:]
     plot_index = raw_df.index[-n:]
 
-    # Baseline (naive last) for comparison (align lengths)
+    # Baseline (naive last) for comparison
     if n > 1:
         naive_pred = y_true[:-1]
         naive_true = y_true[1:]
@@ -231,7 +269,7 @@ with st.status("Initializing…", expanded=True) as s:
     s.write("• Done.")
     s.update(label="Ready", state="complete")
 
-#  Results 
+# Results
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("RMSE (LSTM)", f"{lstm_rmse:.2f}")
 c2.metric("sMAPE (LSTM)", f"{lstm_smape:.2f}%")
