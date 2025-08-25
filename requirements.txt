@@ -1,4 +1,4 @@
-# --- App ---
+# App
 streamlit==1.36.0
 yfinance==0.2.40
 pandas==2.2.2
@@ -7,6 +7,6 @@ scikit-learn==1.4.2
 matplotlib==3.8.4
 joblib==1.3.2
 
-# --- ML runtime (CPU) ---
+# ML runtime (CPU, Linux friendly)
 tensorflow==2.15.0
-keras==3.3.3
+keras==2.15.0
