@@ -25,6 +25,15 @@ This project shows a high level of forecasting the daily closing stock prices of
     pip3 install ipykernel jupyter matplotlib numpy pandas scikit-learn tensorflow kagglehub
 ```
 
+If you want to run the code local on your device:
+
+- Create a `.streamlit/secrets.toml` file
+- Within `secrets.toml` add this
+
+```toml
+ARTIFACT_BASE_URL = "link/to/your/github/model/folder"
+```
+
 ## Why LSTM?
 
 - **Catches Temporal Patterns**: LSTMs are also capable of memorizing long-term dependencies in series data, which is why they would be suitable in stock-prices series.
