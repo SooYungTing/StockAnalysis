@@ -33,8 +33,6 @@ st.set_page_config(
 ARTIFACT_DIR   = "models"
 DEFAULT_COLS_5 = ["Open", "High", "Low", "Close", "Volume"]
 ALT_COLS_4     = ["High", "Low", "Open", "Volume"]
-ARTIFACT_BASE_URL = "https://raw.githubusercontent.com/SooYungTing/StockAnalysis/main/models"
-
 
 # Helpers
 def _get_secret(name: str, default: str = "") -> str:
@@ -198,7 +196,7 @@ with st.sidebar:
 st.title("📈 Financial Time-Series Forecasting (LSTM)")
 st.caption("Educational demo - not financial advice. Model served with pre-trained artifacts and time-based windowing.")
 
-with st.status("Initializing…", expanded=True) as s:
+with st.status("Initialising...", expanded=True) as s:
     # Load artifacts
     try:
         s.write("• Loading model & scalers…")
